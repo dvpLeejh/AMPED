@@ -1,5 +1,5 @@
 defaults:
-  - agent: sbrlv7
+  - agent: ddpg
   - skill_selector: sac
   - override hydra/launcher: submitit_local
 
