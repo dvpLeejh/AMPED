@@ -153,3 +153,14 @@ The implementation of CeSD is adapted from its [CeSD Repository](https://github.
 ## License
 
 This project is licensed under the MIT License -- see the [LICENSE](LICENSE) file for details. Note that the repository relies on third-party libraries subject to their respective licenses.
+
+## Citation
+
+```
+@article{AMPED,
+  title={AMPED: Adaptive Multi-objective Projection for balancing Exploration and skill Diversification},
+  author={Cho, Geonwoo and Lee, Jaemoon and Im, Jaegyun and Lee, Subi and Lee, Jihwan and Kim, Sundong},
+  journal={arXiv preprint arXiv:2506.05980},
+  year={2025}
+}
+```
