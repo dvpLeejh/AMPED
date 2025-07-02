@@ -176,6 +176,50 @@ class ReplayBuffer(IterableDataset):
         while True:
             yield self._sample()
 
+    def sample_episode(self):
+        """Public method to sample a full episode"""
+        try:
+            self._try_fetch()
+        except:
+            traceback.print_exc()
+        
+        if not self._episode_fns:
+            return None
+        
+        return self._sample_episode()
+
+    def sample_trajectory(self, seq_length):
+        """Sample a trajectory of specified length"""
+        episode = self.sample_episode()
+        if episode is None:
+            return None
+        
+        ep_len = episode_len(episode)
+        
+        if ep_len <= seq_length:
+            start_idx = 1
+            actual_length = ep_len
+        else:
+            start_idx = np.random.randint(1, ep_len - seq_length + 2)
+            actual_length = seq_length
+        
+        end_idx = start_idx + actual_length
+        
+        trajectory = {
+            'observation': episode['observation'][start_idx-1:end_idx-1],
+            'action': episode['action'][start_idx:end_idx],
+            'reward': episode['reward'][start_idx:end_idx],
+            'discount': episode['discount'][start_idx:end_idx],
+            'actual_length': actual_length,
+        }
+        
+        # Add meta information
+        for spec in self._storage._meta_specs:
+            if spec.name in episode:
+                trajectory[spec.name] = episode[spec.name][start_idx-1:end_idx-1]
+        
+        return trajectory
+
 
 def _worker_init_fn(worker_id):
     seed = np.random.get_state()[1][0] + worker_id
@@ -206,3 +250,4 @@ def make_replay_loader(
         worker_init_fn=_worker_init_fn,
     )
     return loader
+

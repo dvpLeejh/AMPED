@@ -30,12 +30,12 @@ update_encoder: false # can be either true or false depending if we want to fine
 # misc
 seed: 1
 device: cuda
-save_video: true
+save_video: false
 save_train_video: false
 use_tb: false
 use_wandb: true
 # define specific path for experiment
-wandb_key: your_wandb_key
+wandb_key: a8427ff652cae08031aad508e6c421e3e513d814
 experiment: ${agent.name}_seed_${seed}
 extra_path: .
 

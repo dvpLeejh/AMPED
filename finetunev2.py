@@ -4,6 +4,11 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import os
+
+os.environ["MUJOCO_GL"] = "egl"
+os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
+
+
 import wandb
 import torch
 
@@ -81,7 +86,7 @@ class Workspace:
             )
             wandb.login(key=cfg.wandb_key)
             wandb.init(
-                project="amped", group=cfg.agent.name, name=exp_name, config=config
+                project="amped", entity="qhddl2650" , group=cfg.agent.name, name=exp_name, config=config
             )
         self.logger = Logger(self.work_dir, use_tb=cfg.use_tb, use_wandb=cfg.use_wandb)
         # create envs
@@ -228,6 +233,8 @@ class Workspace:
         self._global_step = 0
         self._global_episode = 0
 
+        print(f"Using skill selector: {type(self.skill_selector).__name__}")
+        print(f"Skill selector config: {self.cfg.skill_selector}")
         time_step = self.train_env.reset()
         meta = self.skill_selector.act(
             time_step.observation, self._global_step, eval_mode=False
@@ -252,6 +259,11 @@ class Workspace:
                 if self.cfg.save_train_video:
                     self.train_video_recorder.save(f"{self.global_frame}.mp4")
                 time_step = self.train_env.reset()
+
+                # Reset for RNN-based skill selectors
+                if hasattr(self.skill_selector, 'reset_episode'):
+                    self.skill_selector.reset_episode()                
+
                 meta = self.skill_selector.act(
                     time_step.observation, self._global_step, eval_mode=False
                 )
@@ -278,10 +290,20 @@ class Workspace:
                 eval_mode=False,
             )
 
+
             if not seed_until_step(self.global_step):
-                skill_selector_metrics = self.skill_selector.update(
-                    self.replay_iter, self._global_step
-                )
+
+                if self.skill_selector.__class__.__name__ in ['DTSkillSelector', 'SACRNNSkillSelector']:
+                    # For DT and SAC-RNN that need trajectory sampling
+                    replay_buffer = self.replay_loader.dataset
+                    skill_selector_metrics = self.skill_selector.update(
+                        replay_buffer, self._global_step
+                    )
+                else:
+                    # For SAC that uses replay_iter
+                    skill_selector_metrics = self.skill_selector.update(
+                        self.replay_iter, self._global_step
+                    )
                 metrics = self.agent.update(self.replay_iter, self._global_step)
                 metrics.update(skill_selector_metrics)
                 self.logger.log_metrics(metrics, self.global_frame, ty="train")
@@ -290,6 +312,11 @@ class Workspace:
 
             time_step = self.train_env.step(action)
             episode_reward += time_step.reward
+
+            # Update RNN skill selector with reward
+            if hasattr(self.skill_selector, 'update_episode_info'):
+                self.skill_selector.update_episode_info(time_step.reward)            
+
             self.replay_storage.add(time_step, {"skill": meta})
             if self.cfg.save_train_video:
                 self.train_video_recorder.record(time_step.observation)
