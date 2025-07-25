@@ -1,0 +1,15 @@
+# @package skill_selector
+_target_: skill_selector.dt.DTSkillSelector
+obs_shape: ???  # to be specified later
+skill_dim: 16
+device: ${device}
+lr: 5e-5
+weight_decay: 1e-4
+warmup_steps: 10000
+context_length: 20
+n_layer: 3
+n_head: 4
+hidden_dim: 128
+dropout: 0.1
+target_return: 1000
+update_every_steps: 50

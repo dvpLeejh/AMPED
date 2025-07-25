@@ -4,13 +4,18 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 import os
+
+os.environ["MUJOCO_GL"] = "osmesa"
+os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
+
+
 import wandb
 import torch
 
 if torch.cuda.is_available():
     os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"
     if "DISPLAY" not in os.environ:
-        os.environ["MUJOCO_GL"] = "egl"
+        os.environ["MUJOCO_GL"] = "osmesa"
     else:
         os.environ["MUJOCO_GL"] = "glfw"
 
@@ -39,7 +44,7 @@ def make_agent(obs_type, obs_spec, action_spec, num_expl_steps, cfg):
     cfg.obs_shape = obs_spec.shape
     cfg.action_shape = action_spec.shape
     cfg.num_expl_steps = num_expl_steps
-    return hydra.utils.instantiate(cfg)
+    return hydra.utils.instantiate(cfg) 
 
 
 def make_skill_selector(obs_spec, cfg):
@@ -81,7 +86,7 @@ class Workspace:
             )
             wandb.login(key=cfg.wandb_key)
             wandb.init(
-                project="amped", group=cfg.agent.name, name=exp_name, config=config
+                project="amped", entity="qhddl2650" , group=cfg.agent.name, name=exp_name, config=config
             )
         self.logger = Logger(self.work_dir, use_tb=cfg.use_tb, use_wandb=cfg.use_wandb)
         # create envs
@@ -228,6 +233,8 @@ class Workspace:
         self._global_step = 0
         self._global_episode = 0
 
+        print(f"Using skill selector: {type(self.skill_selector).__name__}")
+        print(f"Skill selector config: {self.cfg.skill_selector}")
         time_step = self.train_env.reset()
         meta = self.skill_selector.act(
             time_step.observation, self._global_step, eval_mode=False
@@ -252,6 +259,11 @@ class Workspace:
                 if self.cfg.save_train_video:
                     self.train_video_recorder.save(f"{self.global_frame}.mp4")
                 time_step = self.train_env.reset()
+
+                # Reset for RNN-based skill selectors
+                if hasattr(self.skill_selector, 'reset_episode'):
+                    self.skill_selector.reset_episode()                
+
                 meta = self.skill_selector.act(
                     time_step.observation, self._global_step, eval_mode=False
                 )
@@ -278,10 +290,20 @@ class Workspace:
                 eval_mode=False,
             )
 
+
             if not seed_until_step(self.global_step):
-                skill_selector_metrics = self.skill_selector.update(
-                    self.replay_iter, self._global_step
-                )
+
+                if self.skill_selector.__class__.__name__ in ['DTSkillSelector', 'SACRNNSkillSelector']:
+                    # For DT and SAC-RNN that need trajectory sampling
+                    replay_buffer = self.replay_loader.dataset
+                    skill_selector_metrics = self.skill_selector.update(
+                        replay_buffer, self._global_step
+                    )
+                else:
+                    # For SAC that uses replay_iter
+                    skill_selector_metrics = self.skill_selector.update(
+                        self.replay_iter, self._global_step
+                    )
                 metrics = self.agent.update(self.replay_iter, self._global_step)
                 metrics.update(skill_selector_metrics)
                 self.logger.log_metrics(metrics, self.global_frame, ty="train")
@@ -290,6 +312,11 @@ class Workspace:
 
             time_step = self.train_env.step(action)
             episode_reward += time_step.reward
+
+            # Update RNN skill selector with reward
+            if hasattr(self.skill_selector, 'update_episode_info'):
+                self.skill_selector.update_episode_info(time_step.reward)            
+
             self.replay_storage.add(time_step, {"skill": meta})
             if self.cfg.save_train_video:
                 self.train_video_recorder.record(time_step.observation)
@@ -299,6 +326,9 @@ class Workspace:
     def load_snapshot(self):
         snapshot_base_dir = Path(self.cfg.snapshot_base_dir)
         domain, _ = self.cfg.task.split("_", 1)
+        
+        pretrained_seed = self.cfg.get('pretrained_seed', self.cfg.seed)
+        
         snapshot_dir = (
             snapshot_base_dir / self.cfg.obs_type / domain / self.cfg.agent.name
         )
@@ -307,11 +337,11 @@ class Workspace:
             snapshot = (
                 "../../../../../"
                 / snapshot_dir
-                / str(seed)
+                / str(seed) 
                 / f"snapshot_{self.cfg.snapshot_ts}.pt"
             )
             logging.info(
-                "loading model :{},cwd is {}".format(str(snapshot), str(Path.cwd()))
+                f"loading model from seed {seed}: {snapshot}"
             )
             if not snapshot.exists():
                 logging.error("no such a pretrain model")
@@ -320,8 +350,7 @@ class Workspace:
                 payload = torch.load(f, map_location="cpu")
             return payload
 
-        # try to load current seed
-        payload = try_load(self.cfg.seed)
+        payload = try_load(pretrained_seed)
         assert payload is not None
 
         return payload
