@@ -1,7 +1,6 @@
 # skill_selector/__init__.py
 
 from .sac import SkillSelectorAgent
-from .dt import DTSkillSelector
-from .sac_rnn import SACRNNSkillSelector
+from .sac_rnn import SkillSelectorAgent
 
-__all__ = ['SkillSelectorAgent', 'DTSkillSelector', 'SACRNNSkillSelector']
+__all__ = ['SkillSelectorAgent', 'SkillSelectorAgent']
