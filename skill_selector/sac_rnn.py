@@ -56,29 +56,35 @@ class SkillActor(nn.Module):
 
 class SkillCritic(nn.Module):
     """
-        A skill critic that estimates Q-values for given observations and skills
+    Critic network for skill selection. Given an observation, it outputs Q-values
+    for each skill. The architecture mirrors that of the original MLP-based
+    critic from the SAC baseline to ensure a fair comparison. It consists of a
+    small trunk followed by a two-layer MLP.
     """
-    def __init__(self, obs_dim: int, skill_dim: int,
-                 feature_dim: int, hidden_dim: int) -> None:
+
+    def __init__(self, obs_dim: int, skill_dim: int, feature_dim: int, hidden_dim: int) -> None:
         super().__init__()
+        # Feature extractor: linear layer, layer norm and Tanh activation
         self.trunk = nn.Sequential(
             nn.Linear(obs_dim, feature_dim),
             nn.LayerNorm(feature_dim),
             nn.Tanh(),
         )
+        # Q-network: two-layer MLP producing a Q-value for each skill
         self.q_net = nn.Sequential(
             nn.Linear(feature_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, skill_dim),
         )
+        # Initialize weights to match SAC baseline
         self.apply(utils.weight_init)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        """Compute Q-values for a batch of observations."""
         h = self.trunk(obs)
         q_values = self.q_net(h)
         return q_values
-
-
+        
 class SkillSelectorAgent:
     """
         A skill selector agent that uses SAC with RNN for skill selection
@@ -129,6 +135,9 @@ class SkillSelectorAgent:
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=critic_lr)
         self.encoder_opt = None
 
+        # buffer to accumulate observations within an episode. Used only at inference
+        # time to feed the full trajectory to the RNN when acting. This is not used
+        # for policy updates, which are done using replay samples for stability.
         self.trajectory_buffer: List[np.ndarray] = []
         self.hidden_state: Optional[torch.Tensor] = None
 
@@ -151,18 +160,16 @@ class SkillSelectorAgent:
         self.train(False)
 
     def act(self, obs: np.ndarray, step: int, eval_mode: bool = False) -> np.ndarray:
-        # Append the current observation to the trajectory buffer
+        # record the observation and construct the full trajectory tensor. the full
+        # trajectory up to the current step is used to infer the skill distribution
         self.step_count = step
         self.trajectory_buffer.append(obs)
-
         if self.max_trajectory_len > 0 and len(self.trajectory_buffer) > self.max_trajectory_len:
             self.trajectory_buffer.pop(0)
-            
-        # Create sequence tensor
         trajectory = np.array(self.trajectory_buffer, dtype=np.float32)
         traj_tensor = torch.as_tensor(trajectory, device=self.device).unsqueeze(0)
         encoded_traj = self.encoder(traj_tensor)
-        # Use the actor to get logits and hidden state 
+        # feed the full trajectory into the recurrent actor; hidden_state is updated internally
         with torch.no_grad():
             logits, self.hidden_state = self.actor(encoded_traj, self.hidden_state)
         dist = torch.distributions.Categorical(logits=logits)
@@ -185,6 +192,27 @@ class SkillSelectorAgent:
         gamma: float = 0.99,
         tau: float = 0.005,
     ) -> dict:
+        
+        """
+        Update the critic and actor networks. The update consists of two parts:
+            
+            First, the critic is updated using samples from the replay buffer in an
+            off-policy Q-learning manner.
+            
+            Second, the actor is updated by feeding the accumulated observation sequence
+            from the current episode into the GRU to select skills, and then using the
+            Q-values for the last observation to update the policy.
+            
+            Args:
+                replay_iter: Iterator providing batches from the replay buffer.
+                step: Current global step (used for logging and epsilon decay).
+                gamma: Discount factor for Q-learning targets.
+                tau: Soft update coefficient for target networks.
+            
+            Returns:
+                metrics: Dictionary containing critic and actor loss values.
+        """
+        
         metrics: dict = {}
 
         # --- critic update ---
@@ -215,16 +243,24 @@ class SkillSelectorAgent:
         self.critic_opt.step()
         metrics["skill_critic_loss"] = critic_loss.item()
 
-        # --- actor update ---
+        # --- actor update (sequence-based) ---
+        # When training the actor, use the current episode's trajectory as a
+        # sequence to provide temporal context to the GRU. If there is no trajectory yet (e.g.
+        # at the very beginning), skip the update to avoid computing gradients
+        # on an empty buffer.
         if len(self.trajectory_buffer) > 0:
-            seq = np.array(self.trajectory_buffer, dtype=np.float32)
-            seq_tensor = torch.as_tensor(seq, device=self.device).unsqueeze(0)
-            encoded_seq = self.encoder(seq_tensor)
-            logits, _ = self.actor(encoded_seq, None)
-            dist = torch.distributions.Categorical(logits=logits)
-            sampled_skill = dist.sample()
+            # Build a (1, seq_len, obs_dim) tensor of the current trajectory
+            traj = np.array(self.trajectory_buffer, dtype=np.float32)
+            traj_tensor = torch.as_tensor(traj, device=self.device).unsqueeze(0)
+            encoded_traj = self.encoder(traj_tensor)
+            # Forward pass through the GRU over the entire sequence; ignore the
+            # returned hidden state because we only need the final logits
+            logits_seq, _ = self.actor(encoded_traj, None)
+            dist = torch.distributions.Categorical(logits=logits_seq)
+            sampled_skill = dist.sample()  # (batch=1,)
             log_prob = dist.log_prob(sampled_skill)
-            last_obs = torch.as_tensor(self.trajectory_buffer[-1], device=self.device).unsqueeze(0).float()
+            # Evaluate the Q-value for the last observation in the trajectory
+            last_obs = traj_tensor[:, -1, :]
             last_obs_enc = self.encoder(last_obs)
             q_vals_actor = self.critic(last_obs_enc)
             actor_q = q_vals_actor.gather(1, sampled_skill.unsqueeze(1)).squeeze(1)
@@ -238,6 +274,7 @@ class SkillSelectorAgent:
             self.actor_opt.step()
             metrics["skill_actor_loss"] = actor_loss.item()
         else:
+            # No trajectory yet; skip actor update
             metrics["skill_actor_loss"] = 0.0
 
         utils.soft_update_params(self.critic, self.target_critic, tau)
